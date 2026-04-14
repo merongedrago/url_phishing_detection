@@ -123,6 +123,15 @@ def load_rf_results():
     return None
 
 
+@st.cache_data
+def load_lr_results():
+    path = "output/lr_results.json"
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return None
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def metric_card(label: str, value: float, suffix: str = "", delta: str | None = None):
     st.metric(label=label, value=f"{value:.4f}{suffix}", delta=delta)
@@ -230,6 +239,14 @@ def load_rf_model():
     return joblib.load(path)
 
 
+@st.cache_resource
+def load_lr_model():
+    path = "output/models/lr_pipeline.joblib"
+    if not os.path.exists(path):
+        return None
+    return joblib.load(path)
+
+
 def bilstm_predict(url: str, mdl, char2idx, max_len: int) -> float:
     tokens = [char2idx.get(ch, 1) for ch in url[:max_len]]
     tokens += [0] * (max_len - len(tokens))
@@ -240,6 +257,11 @@ def bilstm_predict(url: str, mdl, char2idx, max_len: int) -> float:
 
 
 def rf_predict(url: str, pipeline) -> float:
+    df = pd.DataFrame({"url": [url]})
+    return float(pipeline.predict_proba(df)[0][1])
+
+
+def lr_predict(url: str, pipeline) -> float:
     df = pd.DataFrame({"url": [url]})
     return float(pipeline.predict_proba(df)[0][1])
 
@@ -280,21 +302,21 @@ tab1, tab2 = st.tabs(["🔍 Live URL Check", "📊 Model Comparison"])
 with tab1:
     st.subheader("Enter a URL to analyse")
     st.caption(
-        "Both models score the URL independently. Scores above 50% lean towards phishing."
+        "All three models score the URL independently. Scores above 50% lean towards phishing."
     )
 
     if "url_input" not in st.session_state:
         st.session_state.url_input = ""
 
     with st.expander("Try an example"):
-        st.markdown("**Phishing — both models flag**")
+        st.markdown("**Phishing — all models flag**")
         for ex in [
             "http://secure-bankofamerica.login-verify.com",
         ]:
             if st.button(ex, key=ex):
                 st.session_state.url_input = ex
 
-        st.markdown("**Benign — both models pass**")
+        st.markdown("**Benign — all models pass**")
         for ex in [
             "https://www.nytimes.com/section/technology",
         ]:
@@ -302,17 +324,7 @@ with tab1:
                 st.session_state.url_input = ex
 
         st.markdown(
-            "**RF flags as phishing, BiLSTM more lenient** — real sites the RF overfires on due to distribution shift"
-        )
-        for ex in [
-            "http://sourceforge.net/directory/business-enterprise/",
-            "http://metro.co.uk/2015/04/19/awkward-logo-fails",
-        ]:
-            if st.button(ex, key=ex):
-                st.session_state.url_input = ex
-
-        st.markdown(
-            "**BiLSTM flags as phishing, RF may miss** — phishing-style domains using character patterns outside the RF's training vocabulary"
+            "**LR & RF may flag but BiLSTM recognizes** — phishing-style domains with character patterns outside the training vocabulary"
         )
         for ex in [
             "http://www.paypal.com.account-verify.ru/login",
@@ -322,7 +334,7 @@ with tab1:
                 st.session_state.url_input = ex
 
         st.markdown(
-            "**Uncertain for both models** — legitimate but suspicious-looking structure"
+            "**Uncertain for all models** — legitimate but suspicious-looking structure"
         )
         for ex in [
             "https://login.microsoftonline.com",
@@ -342,40 +354,54 @@ with tab1:
     if run and url_input.strip():
         bilstm_mdl, char2idx, max_len = load_bilstm_model()
         rf_pipeline = load_rf_model()
+        lr_pipeline = load_lr_model()
 
         rf_ready = rf_pipeline is not None
         bilstm_ready = bilstm_mdl is not None
+        lr_ready = lr_pipeline is not None
 
         if not rf_ready:
+            st.warning("Random Forest model not found. Run `analysis/model1_rf.ipynb`.")
+        if not lr_ready:
             st.warning(
-                "Random Forest model not found. "
-                "Run all cells in `analysis/model1_rf.ipynb` to generate it."
+                "Logistic Regression model not found. Run `analysis/model3_logistic.ipynb`."
             )
         if not bilstm_ready:
-            st.warning(
-                "BiLSTM model not found. "
-                "Run all cells in `analysis/model2_bilstm.ipynb` through the Save model cell."
-            )
+            st.warning("BiLSTM model not found. Run `analysis/model2_bilstm.ipynb`.")
 
-        if rf_ready or bilstm_ready:
-            col_rf, col_lstm = st.columns(2)
+        if rf_ready or lr_ready or bilstm_ready:
+            col_lr, col_rf, col_lstm = st.columns(3)
+
+            with col_lr:
+                if lr_ready:
+                    with st.spinner("Running Logistic Regression…"):
+                        lr_prob = lr_predict(url_input.strip(), lr_pipeline)
+                    st.plotly_chart(
+                        gauge_chart(lr_prob, "Logistic Regression"),
+                        use_container_width=True,
+                    )
+                    verdict = (
+                        "🟢 Likely safe"
+                        if lr_prob < 0.35
+                        else "🟠 Suspicious" if lr_prob < 0.65 else "🔴 Likely phishing"
+                    )
+                    st.markdown(f"**{verdict}** ({lr_prob*100:.1f}%)")
+                else:
+                    st.info("Logistic Regression unavailable")
 
             with col_rf:
                 if rf_ready:
                     with st.spinner("Running Random Forest…"):
                         rf_prob = rf_predict(url_input.strip(), rf_pipeline)
                     st.plotly_chart(
-                        gauge_chart(rf_prob, "Random Forest"),
-                        use_container_width=True,
+                        gauge_chart(rf_prob, "Random Forest"), use_container_width=True
                     )
                     verdict = (
                         "🟢 Likely safe"
                         if rf_prob < 0.35
                         else "🟠 Suspicious" if rf_prob < 0.65 else "🔴 Likely phishing"
                     )
-                    st.markdown(
-                        f"**{verdict}** ({rf_prob*100:.1f}% phishing probability)"
-                    )
+                    st.markdown(f"**{verdict}** ({rf_prob*100:.1f}%)")
                 else:
                     st.info("Random Forest unavailable")
 
@@ -386,8 +412,7 @@ with tab1:
                             url_input.strip(), bilstm_mdl, char2idx, max_len
                         )
                     st.plotly_chart(
-                        gauge_chart(lstm_prob, "BiLSTM"),
-                        use_container_width=True,
+                        gauge_chart(lstm_prob, "BiLSTM"), use_container_width=True
                     )
                     verdict = (
                         "🟢 Likely safe"
@@ -398,15 +423,22 @@ with tab1:
                             else "🔴 Likely phishing"
                         )
                     )
-                    st.markdown(
-                        f"**{verdict}** ({lstm_prob*100:.1f}% phishing probability)"
-                    )
+                    st.markdown(f"**{verdict}** ({lstm_prob*100:.1f}%)")
                 else:
                     st.info("BiLSTM unavailable")
 
-            if rf_ready and bilstm_ready:
+            ready_probs = [
+                p
+                for ready, p in [
+                    (rf_ready, rf_prob if rf_ready else None),
+                    (lr_ready, lr_prob if lr_ready else None),
+                    (bilstm_ready, lstm_prob if bilstm_ready else None),
+                ]
+                if ready
+            ]
+            if len(ready_probs) > 1:
                 st.divider()
-                avg_prob = (rf_prob + lstm_prob) / 2
+                avg_prob = sum(ready_probs) / len(ready_probs)
                 if avg_prob < 0.35:
                     st.success(
                         f"**Combined verdict: Likely safe** — average score {avg_prob*100:.1f}%"
@@ -426,10 +458,10 @@ with tab1:
     with st.expander("How do the scores work?"):
         st.markdown(
             """
-- **Random Forest**: uses TF-IDF character n-grams (3–5) plus 12 handcrafted URL statistics.
-  Strong on in-distribution URLs; can overfire on benign URLs with unusual structure.
-- **BiLSTM**: processes the URL character by character using a bidirectional LSTM.
-  More robust to distribution shift since its vocabulary is just the character set.
+
+- **Logistic Regression**: same features as Random Forest but with a linear decision boundary. More interpretable 
+- **Random Forest**: TF-IDF character n-grams (3–5) + 12 handcrafted URL statistics. Strong on in-distribution URLs; can overfire due to vocabulary mismatch on unseen URL styles.
+- **BiLSTM**: processes the URL character by character. More robust to distribution shift since its vocabulary is just the character set.
 - **Threshold**: 50% is the default decision boundary; scores in the 35–65% band are uncertain.
             """
         )
@@ -440,6 +472,7 @@ with tab1:
 # ─────────────────────────────────────────────────────────────────────────────
 with tab2:
     rf_results = load_rf_results()
+    lr_results = load_lr_results()
     bilstm = load_bilstm_results()
 
     def comparison_bar(
@@ -482,22 +515,45 @@ with tab2:
         )
         return fig
 
-    col_rf, col_lstm = st.columns(2)
+    col_lr, col_rf, col_lstm = st.columns(3)
+
+    # ── Logistic Regression column ────────────────────────────────────────────
+    with col_lr:
+        st.subheader("Logistic Regression")
+        st.caption(
+            "TF-IDF char n-grams + 12 handcrafted features — linear & interpretable"
+        )
+
+        if lr_results is None:
+            st.warning(
+                "Run `analysis/model3_logistic.ipynb` to generate `output/lr_results.json`."
+            )
+        else:
+            lp = lr_results["primary"]
+            lk = lr_results["kaggle"]
+            st.plotly_chart(
+                comparison_bar(
+                    lp["recall"],
+                    lp["f1"],
+                    lk["recall"],
+                    lk["f1"],
+                    "Logistic Regression — Recall & F1",
+                ),
+                use_container_width=True,
+            )
 
     # ── Random Forest column ──────────────────────────────────────────────────
     with col_rf:
         st.subheader("Random Forest")
-        st.caption("TF-IDF char n-grams + 12 handcrafted URL features")
+        st.caption("TF-IDF char n-grams + 12 handcrafted features")
 
         if rf_results is None:
             st.warning(
-                "RF results not found. Run all cells in `analysis/model1_rf.ipynb` "
-                "to generate `output/rf_results.json`."
+                "Run `analysis/model1_rf.ipynb` to generate `output/rf_results.json`."
             )
         else:
             rp = rf_results["primary"]
             rk = rf_results["kaggle"]
-
             st.plotly_chart(
                 comparison_bar(
                     rp["recall"],
@@ -509,21 +565,6 @@ with tab2:
                 use_container_width=True,
             )
 
-            st.markdown(
-                """
-**Why these results?**
-
-Primary dataset:
-- Trained on this distribution, so n-gram patterns are familiar
-- Near-perfect performance as expected
-
-Kaggle dataset:
-- Fixed TF-IDF vocabulary does not transfer to new URL styles
-- Flags **97% of URLs as phishing** when only 18% are
-- Classic distribution shift failure
-                """
-            )
-
     # ── BiLSTM column ─────────────────────────────────────────────────────────
     with col_lstm:
         st.subheader("BiLSTM")
@@ -531,13 +572,11 @@ Kaggle dataset:
 
         if bilstm is None:
             st.warning(
-                "BiLSTM results not found. Run all cells in `analysis/model2_bilstm.ipynb` "
-                "through the Save metrics cell to generate `output/bilstm_results.json`."
+                "Run `analysis/model2_bilstm.ipynb` to generate `output/bilstm_results.json`."
             )
         else:
             bp = bilstm["primary"]
             bk = bilstm["kaggle"]
-
             st.plotly_chart(
                 comparison_bar(
                     bp["recall"],
@@ -547,20 +586,6 @@ Kaggle dataset:
                     "BiLSTM — Recall & F1",
                 ),
                 use_container_width=True,
-            )
-
-            st.markdown(
-                """
-**Why these results?**
-
-Primary dataset:
-- Learns character-level patterns end-to-end
-- Competitive with Random Forest on familiar data
-
-Kaggle dataset:
-- Character set (a-z, digits, punctuation) is universal, so no vocabulary mismatch
-- Much smaller performance drop compared to Random Forest
-                """
             )
 
     st.divider()
