@@ -17,6 +17,7 @@ import torch.nn.functional as F
 import joblib
 from urllib.parse import urlparse
 
+
 # ── RF feature functions (must be defined at module level so joblib can unpickle) ─
 def get_url_string(df):
     return df["url"]
@@ -113,6 +114,15 @@ def load_bilstm_results():
     return None
 
 
+@st.cache_data
+def load_rf_results():
+    path = "output/rf_results.json"
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return None
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def metric_card(label: str, value: float, suffix: str = "", delta: str | None = None):
     st.metric(label=label, value=f"{value:.4f}{suffix}", delta=delta)
@@ -165,12 +175,17 @@ def bar_comparison(
 # ══════════════════════════════════════════════════════════════════════════════
 # ── Live inference helpers ─────────────────────────────────────────────────────
 class PhishingBiLSTM(nn.Module):
-    def __init__(self, vocab_size, embed_dim=64, hidden_dim=64, num_layers=1, dropout=0.3):
+    def __init__(
+        self, vocab_size, embed_dim=64, hidden_dim=64, num_layers=1, dropout=0.3
+    ):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.lstm = nn.LSTM(
-            embed_dim, hidden_dim, num_layers=num_layers,
-            batch_first=True, bidirectional=True,
+            embed_dim,
+            hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=True,
             dropout=dropout if num_layers > 1 else 0.0,
         )
         self.dropout = nn.Dropout(dropout)
@@ -230,50 +245,96 @@ def rf_predict(url: str, pipeline) -> float:
 
 
 def gauge_chart(prob: float, title: str) -> go.Figure:
-    color = (
-        "#22c55e" if prob < 0.35
-        else "#f97316" if prob < 0.65
-        else "#ef4444"
-    )
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=round(prob * 100, 1),
-        number={"suffix": "%", "font": {"size": 36}},
-        title={"text": title, "font": {"size": 15}},
-        gauge={
-            "axis": {"range": [0, 100], "tickwidth": 1},
-            "bar": {"color": color},
-            "steps": [
-                {"range": [0, 35], "color": "#dcfce7"},
-                {"range": [35, 65], "color": "#ffedd5"},
-                {"range": [65, 100], "color": "#fee2e2"},
-            ],
-            "threshold": {
-                "line": {"color": "black", "width": 3},
-                "thickness": 0.75,
-                "value": 50,
+    color = "#22c55e" if prob < 0.35 else "#f97316" if prob < 0.65 else "#ef4444"
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=round(prob * 100, 1),
+            number={"suffix": "%", "font": {"size": 36}},
+            title={"text": title, "font": {"size": 15}},
+            gauge={
+                "axis": {"range": [0, 100], "tickwidth": 1},
+                "bar": {"color": color},
+                "steps": [
+                    {"range": [0, 35], "color": "#dcfce7"},
+                    {"range": [35, 65], "color": "#ffedd5"},
+                    {"range": [65, 100], "color": "#fee2e2"},
+                ],
+                "threshold": {
+                    "line": {"color": "black", "width": 3},
+                    "thickness": 0.75,
+                    "value": 50,
+                },
             },
-        },
-    ))
+        )
+    )
     fig.update_layout(height=260, margin=dict(t=40, b=10, l=20, r=20))
     return fig
 
 
-tab1, tab2, tab3 = st.tabs(
-    ["🔍 Live URL Check", "📊 Model Comparison", "📝 Discussion"]
-)
+tab1, tab2 = st.tabs(["🔍 Live URL Check", "📊 Model Comparison"])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 — Live URL Check
 # ─────────────────────────────────────────────────────────────────────────────
 with tab1:
     st.subheader("Enter a URL to analyse")
-    st.caption("Both models score the URL independently. Scores above 50% lean towards phishing.")
+    st.caption(
+        "Both models score the URL independently. Scores above 50% lean towards phishing."
+    )
+
+    if "url_input" not in st.session_state:
+        st.session_state.url_input = ""
+
+    with st.expander("Try an example"):
+        st.markdown("**Phishing — both models flag**")
+        for ex in [
+            "http://secure-bankofamerica.login-verify.com",
+        ]:
+            if st.button(ex, key=ex):
+                st.session_state.url_input = ex
+
+        st.markdown("**Benign — both models pass**")
+        for ex in [
+            "https://www.nytimes.com/section/technology",
+        ]:
+            if st.button(ex, key=ex):
+                st.session_state.url_input = ex
+
+        st.markdown(
+            "**RF flags as phishing, BiLSTM more lenient** — real sites the RF overfires on due to distribution shift"
+        )
+        for ex in [
+            "http://sourceforge.net/directory/business-enterprise/",
+            "http://metro.co.uk/2015/04/19/awkward-logo-fails",
+        ]:
+            if st.button(ex, key=ex):
+                st.session_state.url_input = ex
+
+        st.markdown(
+            "**BiLSTM flags as phishing, RF may miss** — phishing-style domains using character patterns outside the RF's training vocabulary"
+        )
+        for ex in [
+            "http://www.paypal.com.account-verify.ru/login",
+            "http://arnazon-secure.com/account/login?redirect=billing",
+        ]:
+            if st.button(ex, key=ex):
+                st.session_state.url_input = ex
+
+        st.markdown(
+            "**Uncertain for both models** — legitimate but suspicious-looking structure"
+        )
+        for ex in [
+            "https://login.microsoftonline.com",
+        ]:
+            if st.button(ex, key=ex):
+                st.session_state.url_input = ex
 
     url_input = st.text_input(
         "URL",
         placeholder="https://example.com/login?ref=abc123",
         label_visibility="collapsed",
+        key="url_input",
     )
 
     run = st.button("Analyse", type="primary", use_container_width=False)
@@ -308,28 +369,38 @@ with tab1:
                         use_container_width=True,
                     )
                     verdict = (
-                        "🟢 Likely safe" if rf_prob < 0.35
-                        else "🟠 Suspicious" if rf_prob < 0.65
-                        else "🔴 Likely phishing"
+                        "🟢 Likely safe"
+                        if rf_prob < 0.35
+                        else "🟠 Suspicious" if rf_prob < 0.65 else "🔴 Likely phishing"
                     )
-                    st.markdown(f"**{verdict}** ({rf_prob*100:.1f}% phishing probability)")
+                    st.markdown(
+                        f"**{verdict}** ({rf_prob*100:.1f}% phishing probability)"
+                    )
                 else:
                     st.info("Random Forest unavailable")
 
             with col_lstm:
                 if bilstm_ready:
                     with st.spinner("Running BiLSTM…"):
-                        lstm_prob = bilstm_predict(url_input.strip(), bilstm_mdl, char2idx, max_len)
+                        lstm_prob = bilstm_predict(
+                            url_input.strip(), bilstm_mdl, char2idx, max_len
+                        )
                     st.plotly_chart(
                         gauge_chart(lstm_prob, "BiLSTM"),
                         use_container_width=True,
                     )
                     verdict = (
-                        "🟢 Likely safe" if lstm_prob < 0.35
-                        else "🟠 Suspicious" if lstm_prob < 0.65
-                        else "🔴 Likely phishing"
+                        "🟢 Likely safe"
+                        if lstm_prob < 0.35
+                        else (
+                            "🟠 Suspicious"
+                            if lstm_prob < 0.65
+                            else "🔴 Likely phishing"
+                        )
                     )
-                    st.markdown(f"**{verdict}** ({lstm_prob*100:.1f}% phishing probability)")
+                    st.markdown(
+                        f"**{verdict}** ({lstm_prob*100:.1f}% phishing probability)"
+                    )
                 else:
                     st.info("BiLSTM unavailable")
 
@@ -337,11 +408,17 @@ with tab1:
                 st.divider()
                 avg_prob = (rf_prob + lstm_prob) / 2
                 if avg_prob < 0.35:
-                    st.success(f"**Combined verdict: Likely safe** — average score {avg_prob*100:.1f}%")
+                    st.success(
+                        f"**Combined verdict: Likely safe** — average score {avg_prob*100:.1f}%"
+                    )
                 elif avg_prob < 0.65:
-                    st.warning(f"**Combined verdict: Suspicious** — average score {avg_prob*100:.1f}%")
+                    st.warning(
+                        f"**Combined verdict: Suspicious** — average score {avg_prob*100:.1f}%"
+                    )
                 else:
-                    st.error(f"**Combined verdict: Likely phishing** — average score {avg_prob*100:.1f}%")
+                    st.error(
+                        f"**Combined verdict: Likely phishing** — average score {avg_prob*100:.1f}%"
+                    )
 
     elif run:
         st.info("Please enter a URL first.")
@@ -362,34 +439,44 @@ with tab1:
 # TAB 2 — Model Comparison
 # ─────────────────────────────────────────────────────────────────────────────
 with tab2:
+    rf_results = load_rf_results()
     bilstm = load_bilstm_results()
 
-    def comparison_bar(primary_acc, primary_prec, primary_f1,
-                       kaggle_acc, kaggle_prec, kaggle_f1, model_name):
-        """Grouped bar chart: Accuracy, Precision & F1 — Primary vs Kaggle."""
-        metrics = ["Accuracy", "Precision", "F1"]
+    def comparison_bar(
+        primary_recall, primary_f1, kaggle_recall, kaggle_f1, model_name
+    ):
+        """Grouped bar chart: Recall & F1 — Primary vs Kaggle."""
+        metrics = ["Recall", "F1"]
+        primary_vals = [primary_recall, primary_f1]
+        kaggle_vals = [kaggle_recall, kaggle_f1]
         fig = go.Figure()
-        fig.add_trace(go.Bar(
-            name="Primary Dataset",
-            x=metrics,
-            y=[primary_acc, primary_prec, primary_f1],
-            marker_color="#3B82F6",
-            text=[f"{v:.1%}" for v in [primary_acc, primary_prec, primary_f1]],
-            textposition="outside",
-        ))
-        fig.add_trace(go.Bar(
-            name="Kaggle (Secondary)",
-            x=metrics,
-            y=[kaggle_acc, kaggle_prec, kaggle_f1],
-            marker_color="#EF4444",
-            text=[f"{v:.1%}" for v in [kaggle_acc, kaggle_prec, kaggle_f1]],
-            textposition="outside",
-        ))
+        fig.add_trace(
+            go.Bar(
+                name="Primary Dataset",
+                x=metrics,
+                y=primary_vals,
+                marker_color="#3B82F6",
+                text=[f"{v:.1%}" for v in primary_vals],
+                textposition="outside",
+            )
+        )
+        fig.add_trace(
+            go.Bar(
+                name="Kaggle (Secondary)",
+                x=metrics,
+                y=kaggle_vals,
+                marker_color="#EF4444",
+                text=[f"{v:.1%}" for v in kaggle_vals],
+                textposition="outside",
+            )
+        )
         fig.update_layout(
             barmode="group",
             title=model_name,
             yaxis=dict(range=[0, 1.15], tickformat=".0%", title="Score"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+            ),
             height=380,
             margin=dict(t=60, b=20, l=10, r=10),
         )
@@ -402,21 +489,28 @@ with tab2:
         st.subheader("Random Forest")
         st.caption("TF-IDF char n-grams + 12 handcrafted URL features")
 
-        st.plotly_chart(
-            comparison_bar(
-                RF["primary"]["accuracy"],
-                RF["primary"]["precision"],
-                RF["primary"]["f1"],
-                RF["kaggle"]["accuracy"],
-                RF["kaggle"]["precision"],
-                RF["kaggle"]["f1"],
-                "Random Forest — Accuracy, Precision & F1",
-            ),
-            use_container_width=True,
-        )
+        if rf_results is None:
+            st.warning(
+                "RF results not found. Run all cells in `analysis/model1_rf.ipynb` "
+                "to generate `output/rf_results.json`."
+            )
+        else:
+            rp = rf_results["primary"]
+            rk = rf_results["kaggle"]
 
-        st.markdown(
-            """
+            st.plotly_chart(
+                comparison_bar(
+                    rp["recall"],
+                    rp["f1"],
+                    rk["recall"],
+                    rk["f1"],
+                    "Random Forest — Recall & F1",
+                ),
+                use_container_width=True,
+            )
+
+            st.markdown(
+                """
 **Why these results?**
 
 Primary dataset:
@@ -427,8 +521,8 @@ Kaggle dataset:
 - Fixed TF-IDF vocabulary does not transfer to new URL styles
 - Flags **97% of URLs as phishing** when only 18% are
 - Classic distribution shift failure
-            """
-        )
+                """
+            )
 
     # ── BiLSTM column ─────────────────────────────────────────────────────────
     with col_lstm:
@@ -446,13 +540,11 @@ Kaggle dataset:
 
             st.plotly_chart(
                 comparison_bar(
-                    bp["accuracy"],
-                    bp["precision"],
+                    bp["recall"],
                     bp["f1"],
-                    bk["accuracy"],
-                    bk["precision"],
+                    bk["recall"],
                     bk["f1"],
-                    "BiLSTM — Accuracy, Precision & F1",
+                    "BiLSTM — Recall & F1",
                 ),
                 use_container_width=True,
             )
@@ -467,50 +559,11 @@ Primary dataset:
 
 Kaggle dataset:
 - Character set (a-z, digits, punctuation) is universal, so no vocabulary mismatch
-- Reads URLs left-to-right and right-to-left to catch prefix and suffix cues
 - Much smaller performance drop compared to Random Forest
                 """
             )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 3 — Discussion
-# ─────────────────────────────────────────────────────────────────────────────
-with tab3:
-    st.subheader("Discussion")
-
-    st.markdown(
-        """
-### Strengths & Weaknesses
-
-| | Random Forest | BiLSTM |
-|---|---|---|
-| Primary accuracy | 99.65% | Competitive |
-| Kaggle generalisation | Collapses | Holds up |
-| Training speed | Seconds | Minutes |
-| Interpretability | Feature importances | Black box |
-| Feature engineering | 12 handcrafted features | None |
-| Distribution shift risk | High | Low |
-
----
-
-### Conclusions
-
-- Both models score near-perfect on the primary dataset, but that overstates real-world performance
-- The Random Forest fails on Kaggle due to vocabulary mismatch
-- The BiLSTM holds up better because its character set is universal
-- Missing a phishing URL is the costliest error, so false negative rate matters most
-
----
-
-### Future Work
-
-- **Late fusion**: combine BiLSTM embeddings with RF handcrafted features
-- **Longer sequences**: URLs over 100 chars get truncated; a Transformer would handle these
-- **Transfer learning**: a pre-trained model like URLTran or SecureBERT would likely outperform both
-- **Adversarial testing**: evaluate against homoglyph attacks and subdomain abuse
-        """
-    )
-
     st.divider()
-    st.caption("Project: Phishing URL Detection | Duke MIDS | ML for Cybersecurity")
+    st.caption(
+        "Meron Gedrago | Project: Phishing URL Detection | Duke MIDS | ML for Cybersecurity"
+    )
