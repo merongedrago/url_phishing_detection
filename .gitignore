@@ -1,0 +1,18 @@
+# Datasets (too large / contain sensitive strings)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Environments
+.env
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Streamlit
+.streamlit/secrets.toml
