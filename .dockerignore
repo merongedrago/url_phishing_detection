@@ -1,0 +1,8 @@
+*.ipynb
+*.pt
+*.png
+generate_results.py
+precompute_stats.py
+__pycache__
+.git
+.gitignore
